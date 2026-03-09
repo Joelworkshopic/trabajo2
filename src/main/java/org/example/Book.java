@@ -21,7 +21,7 @@ public class Book {
     @Column(name = "download_count", nullable = false)
     private Integer downloadCount;
 
-    @ManyToMany
+    @ManyToMany(fetch = FetchType.EAGER)
     @JoinTable(
             name = "libros_autores",
             joinColumns = @JoinColumn(name = "libro_id"),

@@ -21,7 +21,7 @@ public class Author {
     @Column(name = "death_year")
     private Integer deathYear;
 
-    @ManyToMany(mappedBy = "authors")
+    @ManyToMany(mappedBy = "authors", fetch = FetchType.EAGER)
     private Set<Book> books = new HashSet<>();
 
     // Constructors
