@@ -32,7 +32,6 @@ public class Main implements CommandLineRunner {
     }
 
     @Override
-    @Transactional
     public void run(String... args) throws Exception {
         Scanner scanner = new Scanner(System.in);
         HttpClient client = HttpClient.newHttpClient();
@@ -83,6 +82,7 @@ public class Main implements CommandLineRunner {
     }
 
     // ==================== OPCIÓN 1: BUSCAR Y GUARDAR ====================
+    @Transactional
     private void buscarYGuardarLibro(HttpClient client, String titulo) {
         String url = BASE_URL + "?search=" + titulo.replace(" ", "%20");
 
