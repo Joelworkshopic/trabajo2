@@ -3,27 +3,37 @@ package org.example;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.transaction.annotation.Transactional;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.sql.*;
 import java.util.Scanner;
+import java.util.Set;
 
-public class Main {
+@SpringBootApplication
+public class Main implements CommandLineRunner {
 
     private static final String BASE_URL = "https://gutendex.com/books/";
     private static final Gson gson = new Gson();
 
-    // Configuración PostgreSQL
-    private static final String DB_URL = "jdbc:postgresql://localhost:5432/gutendex";
-    private static final String DB_USER = "postgres";
-    private static final String DB_PASS = "shijima";
+    @Autowired
+    private BookRepository bookRepository;
+
+    @Autowired
+    private AuthorRepository authorRepository;
 
     public static void main(String[] args) {
+        SpringApplication.run(Main.class, args);
+    }
+
+    @Override
+    @Transactional
+    public void run(String... args) throws Exception {
         Scanner scanner = new Scanner(System.in);
         HttpClient client = HttpClient.newHttpClient();
         boolean running = true;
@@ -52,7 +62,7 @@ public class Main {
                 case 4 -> {
                     System.out.print("Ingrese un año: ");
                     try {
-                        listarAutoresVivosEnAnio(client, Integer.parseInt(scanner.nextLine().trim()));
+                        listarAutoresVivosEnAnio(Integer.parseInt(scanner.nextLine().trim()));
                     } catch (NumberFormatException e) {
                         System.out.println("Año ingresado inválido.");
                     }
@@ -73,7 +83,7 @@ public class Main {
     }
 
     // ==================== OPCIÓN 1: BUSCAR Y GUARDAR ====================
-    private static void buscarYGuardarLibro(HttpClient client, String titulo) {
+    private void buscarYGuardarLibro(HttpClient client, String titulo) {
         String url = BASE_URL + "?search=" + titulo.replace(" ", "%20");
 
         try {
@@ -122,36 +132,14 @@ public class Main {
         }
     }
 
-    // ==================== VERIFICAR EXISTENCIA DEL LIBRO ====================
-    private static boolean libroExiste(String titulo) {
-        String sql = "SELECT 1 FROM libros WHERE title = ?";
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
-            stmt.setString(1, titulo);
-            ResultSet rs = stmt.executeQuery();
-            return rs.next();
-        } catch (SQLException e) {
-            System.out.println("❌ Error de base de datos al verificar libro: " + e.getMessage());
+    // ==================== GUARDAR LIBRO + AUTORES ====================
+    private boolean guardarLibroEnDB(String titulo, JsonArray autoresJson, String idioma, int descargas) {
+        if (bookRepository.findByTitle(titulo).isPresent()) {
             return false;
         }
-    }
 
-    // ==================== GUARDAR LIBRO + AUTORES ====================
-    private static boolean guardarLibroEnDB(String titulo, JsonArray autoresJson, String idioma, int descargas) {
-        if (libroExiste(titulo)) return false;
-
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS)) {
-            conn.setAutoCommit(false);
-
-            int libroId = -1;
-            String insertLibroSQL = "INSERT INTO libros (title, language, download_count) VALUES (?, ?, ?) RETURNING id";
-            try (PreparedStatement stmt = conn.prepareStatement(insertLibroSQL)) {
-                stmt.setString(1, titulo);
-                stmt.setString(2, idioma);
-                stmt.setInt(3, descargas);
-                ResultSet rs = stmt.executeQuery();
-                if (rs.next()) libroId = rs.getInt(1);
-            }
+        try {
+            Book libro = new Book(titulo, idioma, descargas);
 
             for (int i = 0; i < autoresJson.size(); i++) {
                 JsonObject autorObj = autoresJson.get(i).getAsJsonObject();
@@ -161,166 +149,150 @@ public class Main {
                 Integer muerte = autorObj.has("death_year") && !autorObj.get("death_year").isJsonNull()
                         ? autorObj.get("death_year").getAsInt() : null;
 
-                int autorId = -1;
-                String selectAutorSQL = "SELECT id FROM autores WHERE name = ?";
-                try (PreparedStatement stmt = conn.prepareStatement(selectAutorSQL)) {
-                    stmt.setString(1, nombreAutor);
-                    ResultSet rs = stmt.executeQuery();
-                    if (rs.next()) autorId = rs.getInt("id");
-                }
+                Author autor = authorRepository.findByName(nombreAutor)
+                        .orElseGet(() -> authorRepository.save(new Author(nombreAutor, nacimiento, muerte)));
 
-                if (autorId == -1) {
-                    String insertAutorSQL = "INSERT INTO autores (name, birth_year, death_year) VALUES (?, ?, ?) RETURNING id";
-                    try (PreparedStatement stmt = conn.prepareStatement(insertAutorSQL)) {
-                        stmt.setString(1, nombreAutor);
-                        if (nacimiento != null) stmt.setInt(2, nacimiento); else stmt.setNull(2, Types.INTEGER);
-                        if (muerte != null) stmt.setInt(3, muerte); else stmt.setNull(3, Types.INTEGER);
-                        ResultSet rs = stmt.executeQuery();
-                        if (rs.next()) autorId = rs.getInt(1);
-                    }
-                }
-
-                if (libroId != -1 && autorId != -1) {
-                    String insertLA = "INSERT INTO libros_autores (libro_id, autor_id) VALUES (?, ?) ON CONFLICT DO NOTHING";
-                    try (PreparedStatement stmt = conn.prepareStatement(insertLA)) {
-                        stmt.setInt(1, libroId);
-                        stmt.setInt(2, autorId);
-                        stmt.executeUpdate();
-                    }
-                }
+                libro.addAuthor(autor);
             }
 
-            conn.commit();
+            bookRepository.save(libro);
             return true;
 
-        } catch (SQLException e) {
+        } catch (Exception e) {
             System.out.println("❌ Error de base de datos: " + e.getMessage());
             return false;
         }
     }
 
     // ==================== OPCIÓN 2: LISTAR LIBROS ====================
-    private static void listarLibros() {
-        String sql = "SELECT l.title, l.language, l.download_count, STRING_AGG(a.name, ', ') AS autores " +
-                "FROM libros l " +
-                "LEFT JOIN libros_autores la ON la.libro_id = l.id " +
-                "LEFT JOIN autores a ON a.id = la.autor_id " +
-                "GROUP BY l.id, l.title, l.language, l.download_count";
+    @Transactional
+    private void listarLibros() {
+        try {
+            var libros = bookRepository.findAll();
 
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-
-            boolean hayLibros = false;
-            while (rs.next()) {
-                hayLibros = true;
-                System.out.println("- Título: " + rs.getString("title"));
-                System.out.println("  Autor(es): (" + rs.getString("autores") + ")");
-                System.out.println("  Idioma: " + rs.getString("language"));
-                System.out.println("  Descargas: " + rs.getInt("download_count"));
+            if (libros.isEmpty()) {
+                System.out.println("No hay libros registrados en la base de datos.");
+                return;
             }
-            if (!hayLibros) System.out.println("No hay libros registrados en la base de datos.");
 
-        } catch (SQLException e) {
+            for (Book libro : libros) {
+                System.out.println("- Título: " + libro.getTitle());
+                System.out.println("  Autor(es): (" + formatAutoresFromSet(libro.getAuthors()) + ")");
+                System.out.println("  Idioma: " + libro.getLanguage());
+                System.out.println("  Descargas: " + libro.getDownloadCount());
+            }
+
+        } catch (Exception e) {
             System.out.println("❌ Error al listar libros: " + e.getMessage());
         }
     }
 
     // ==================== OPCIÓN 3: LISTAR AUTORES ====================
-    private static void listarAutores() {
-        String sql = "SELECT a.name, a.birth_year, a.death_year, STRING_AGG(l.title, ', ') AS libros " +
-                "FROM autores a " +
-                "LEFT JOIN libros_autores la ON la.autor_id = a.id " +
-                "LEFT JOIN libros l ON l.id = la.libro_id " +
-                "GROUP BY a.id, a.name, a.birth_year, a.death_year";
+    @Transactional
+    private void listarAutores() {
+        try {
+            var autores = authorRepository.findAll();
 
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
-
-            boolean hayAutores = false;
-            while (rs.next()) {
-                hayAutores = true;
-                System.out.println("- Nombre: " + rs.getString("name"));
-                System.out.println("  Año de nacimiento: " + (rs.getObject("birth_year") != null ? rs.getInt("birth_year") : "Desconocido"));
-                System.out.println("  Año de muerte: " + (rs.getObject("death_year") != null ? rs.getInt("death_year") : "Desconocido"));
-                System.out.println("  Libros: " + (rs.getString("libros") != null ? rs.getString("libros") : "Ninguno"));
+            if (autores.isEmpty()) {
+                System.out.println("No hay autores registrados en la base de datos.");
+                return;
             }
-            if (!hayAutores) System.out.println("No hay autores registrados en la base de datos.");
 
-        } catch (SQLException e) {
+            for (Author autor : autores) {
+                System.out.println("- Nombre: " + autor.getName());
+                System.out.println("  Año de nacimiento: " + (autor.getBirthYear() != null ? autor.getBirthYear() : "Desconocido"));
+                System.out.println("  Año de muerte: " + (autor.getDeathYear() != null ? autor.getDeathYear() : "Desconocido"));
+                System.out.println("  Libros: " + (autor.getBooks().isEmpty() ? "Ninguno" : formatBooksFromSet(autor.getBooks())));
+            }
+
+        } catch (Exception e) {
             System.out.println("❌ Error al listar autores: " + e.getMessage());
         }
     }
 
     // ==================== OPCIÓN 4: AUTORES VIVOS EN UN AÑO ====================
-    private static void listarAutoresVivosEnAnio(HttpClient client, int anio) {
-        String sql = "SELECT a.name, a.birth_year, a.death_year, STRING_AGG(l.title, ', ') AS libros " +
-                "FROM autores a " +
-                "LEFT JOIN libros_autores la ON la.autor_id = a.id " +
-                "LEFT JOIN libros l ON l.id = la.libro_id " +
-                "WHERE (a.birth_year IS NULL OR a.birth_year <= ?) AND (a.death_year IS NULL OR a.death_year >= ?) " +
-                "GROUP BY a.id, a.name, a.birth_year, a.death_year";
+    @Transactional
+    private void listarAutoresVivosEnAnio(int anio) {
+        try {
+            var autores = authorRepository.findByBirthYearLessThanEqualAndDeathYearGreaterThanEqual(anio, anio);
 
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
-
-            stmt.setInt(1, anio);
-            stmt.setInt(2, anio);
-            ResultSet rs = stmt.executeQuery();
-
-            boolean hayVivos = false;
-            while (rs.next()) {
-                hayVivos = true;
-                System.out.println("- Nombre: " + rs.getString("name"));
-                System.out.println("  Año de nacimiento: " + (rs.getObject("birth_year") != null ? rs.getInt("birth_year") : "Desconocido"));
-                System.out.println("  Año de muerte: " + (rs.getObject("death_year") != null ? rs.getInt("death_year") : "Desconocido"));
-                System.out.println("  Libros: " + (rs.getString("libros") != null ? rs.getString("libros") : "Ninguno"));
+            if (autores.isEmpty()) {
+                System.out.println("No hay autores vivos registrados en ese año.");
+                return;
             }
-            if (!hayVivos) System.out.println("No hay autores vivos registrados en ese año.");
 
-        } catch (SQLException e) {
+            for (Author autor : autores) {
+                System.out.println("- Nombre: " + autor.getName());
+                System.out.println("  Año de nacimiento: " + (autor.getBirthYear() != null ? autor.getBirthYear() : "Desconocido"));
+                System.out.println("  Año de muerte: " + (autor.getDeathYear() != null ? autor.getDeathYear() : "Desconocido"));
+                System.out.println("  Libros: " + (autor.getBooks().isEmpty() ? "Ninguno" : formatBooksFromSet(autor.getBooks())));
+            }
+
+        } catch (Exception e) {
             System.out.println("❌ Error al listar autores por año: " + e.getMessage());
         }
     }
 
     // ==================== OPCIÓN 5: LISTAR LIBROS POR IDIOMA ====================
-    private static void listarLibrosPorIdioma(String idioma) {
-        String sql = "SELECT l.title, l.language, l.download_count, STRING_AGG(a.name, ', ') AS autores " +
-                "FROM libros l " +
-                "LEFT JOIN libros_autores la ON la.libro_id = l.id " +
-                "LEFT JOIN autores a ON a.id = la.autor_id " +
-                "WHERE l.language = ? " +
-                "GROUP BY l.id, l.title, l.language, l.download_count";
+    @Transactional
+    private void listarLibrosPorIdioma(String idioma) {
+        try {
+            var libros = bookRepository.findAll().stream()
+                    .filter(l -> l.getLanguage().equalsIgnoreCase(idioma))
+                    .toList();
 
-        try (Connection conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASS);
-             PreparedStatement stmt = conn.prepareStatement(sql)) {
-
-            stmt.setString(1, idioma.toUpperCase());
-            ResultSet rs = stmt.executeQuery();
-
-            boolean hayLibros = false;
-            while (rs.next()) {
-                hayLibros = true;
-                System.out.println("- Título: " + rs.getString("title"));
-                System.out.println("  Autor(es): (" + rs.getString("autores") + ")");
-                System.out.println("  Idioma: " + rs.getString("language"));
-                System.out.println("  Descargas: " + rs.getInt("download_count"));
+            if (libros.isEmpty()) {
+                System.out.println("No hay libros registrados en ese idioma.");
+                return;
             }
-            if (!hayLibros) System.out.println("No hay libros registrados en ese idioma.");
 
-        } catch (SQLException e) {
+            for (Book libro : libros) {
+                System.out.println("- Título: " + libro.getTitle());
+                System.out.println("  Autor(es): (" + formatAutoresFromSet(libro.getAuthors()) + ")");
+                System.out.println("  Idioma: " + libro.getLanguage());
+                System.out.println("  Descargas: " + libro.getDownloadCount());
+            }
+
+        } catch (Exception e) {
             System.out.println("❌ Error al listar libros por idioma: " + e.getMessage());
         }
     }
 
     // ==================== AUXILIARES ====================
-    private static String formatAutores(JsonArray autoresJson) {
+    private String formatAutores(JsonArray autoresJson) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < autoresJson.size(); i++) {
             JsonObject autorObj = autoresJson.get(i).getAsJsonObject();
             sb.append(autorObj.get("name").getAsString());
             if (i < autoresJson.size() - 1) sb.append(", ");
+        }
+        return sb.toString();
+    }
+
+    private String formatAutoresFromSet(Set<?> collection) {
+        if (collection.isEmpty()) return "Ninguno";
+        StringBuilder sb = new StringBuilder();
+        int count = 0;
+        for (Object obj : collection) {
+            if (obj instanceof Author) {
+                sb.append(((Author) obj).getName());
+            } else if (obj instanceof Book) {
+                sb.append(((Book) obj).getTitle());
+            }
+            count++;
+            if (count < collection.size()) sb.append(", ");
+        }
+        return sb.toString();
+    }
+
+    private String formatBooksFromSet(Set<Book> books) {
+        if (books.isEmpty()) return "Ninguno";
+        StringBuilder sb = new StringBuilder();
+        int count = 0;
+        for (Book book : books) {
+            sb.append(book.getTitle());
+            count++;
+            if (count < books.size()) sb.append(", ");
         }
         return sb.toString();
     }
