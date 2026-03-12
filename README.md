@@ -21,8 +21,8 @@ La aplicación requiere una base de datos PostgreSQL configurada con los siguien
 
 ```
 spring.datasource.url=jdbc:postgresql://localhost:5432/gutendex
-spring.datasource.username=postgres
-spring.datasource.password=shijima
+spring.datasource.username=personalizable
+spring.datasource.password=personalizable
 ```
 
 Asegúrate de crear la base de datos `gutendex` en tu servidor PostgreSQL antes de ejecutar la aplicación.
